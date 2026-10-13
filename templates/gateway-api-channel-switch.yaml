@@ -1,0 +1,162 @@
+{{- if and .Values.gatewayAPI.enabled (eq .Values.gatewayAPI.channel "experimental") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: relax-safe-upgrades-vap
+  namespace: gateway-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-6"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      serviceAccountName: gateway-api-hook-manager
+      restartPolicy: Never
+      containers:
+        - name: kubectl
+          image: alpine/k8s:1.31.0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          command:
+            - /bin/sh
+            - -c
+            - |
+              kubectl patch validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io \
+                --type=merge -p '{"spec":{"validationActions":["Warn"]}}' 2>/dev/null || true
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: restore-safe-upgrades-vap
+  namespace: gateway-system
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      serviceAccountName: gateway-api-hook-manager
+      restartPolicy: Never
+      containers:
+        - name: kubectl
+          image: alpine/k8s:1.31.0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for all Gateway API CRDs to be Established..."
+
+              crds=$(kubectl get crd -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep '\.gateway\.networking\.k8s\.io$')
+
+              if [ -z "$crds" ]; then
+                echo "ERROR: No Gateway API CRDs found in the cluster. Aborting VAP restore."
+                exit 1
+              fi
+
+              echo "Found CRDs to check:"
+              echo "$crds"
+
+              all_ready=false
+              for i in $(seq 1 30); do
+                all_ready=true
+                for crd in $crds; do
+                  ready=$(kubectl get crd "$crd" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')
+                  if [ "$ready" != "True" ]; then
+                    all_ready=false
+                    echo "Not yet established: $crd"
+                  fi
+                done
+
+                if [ "$all_ready" = "true" ]; then
+                  echo "All Gateway API CRDs established, proceeding."
+                  break
+                fi
+
+                sleep 5
+              done
+
+              if [ "$all_ready" != "true" ]; then
+                echo "ERROR: One or more Gateway API CRDs did not become Established within timeout. Aborting VAP restore."
+                exit 1
+              fi
+
+              if ! kubectl patch validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io \
+                --type=merge -p '{"spec":{"validationActions":["Deny"]}}'; then
+                echo "ERROR: Failed to restore VAP to Deny mode."
+                exit 1
+              fi
+
+              echo "VAP restored to Deny mode successfully."
+{{- end }}
+{{- if and .Values.gatewayAPI.enabled (eq .Values.gatewayAPI.channel "standard") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cleanup-experimental-instances
+  namespace: gateway-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/hook-failure-policy: Abort
+spec:
+  template:
+    spec:
+      serviceAccountName: gateway-api-hook-manager
+      restartPolicy: Never
+      containers:
+        - name: kubectl
+          image: alpine/k8s:1.31.0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              # Find every CRD currently labeled experimental in the gateway.networking.k8s.io group
+              experimental_crds=$(kubectl get crd -l gateway.networking.k8s.io/channel=experimental -o name)
+
+              if [ -z "$experimental_crds" ]; then
+                echo "No experimental-channel CRDs found in cluster — nothing to clean up, skipping."
+                exit 0
+              fi
+
+              echo "Experimental CRDs found:"
+              echo "$experimental_crds"
+
+              for crd in $experimental_crds; do
+                # crd looks like customresourcedefinition.apiextensions.k8s.io/tcproutes.gateway.networking.k8s.io
+                resource=$(echo "$crd" | sed 's|.*/||')
+                count=$(kubectl get "$resource" -A --no-headers 2>/dev/null | wc -l)
+                if [ "$count" -gt 0 ]; then
+                  echo "Found $count instances of $resource — deleting"
+                  kubectl get "$resource" -A --no-headers 2>/dev/null
+                  echo "Deleting $resource cluster-wide..."
+                  kubectl delete "$resource" --all -A || echo "WARNING: deletion of $resource may have partially failed
+                else
+                  echo "No instances of $resource found — nothing to delete for this CRD"
+                fi
+              done
+
+              echo "Cleanup complete."
+{{- end }}

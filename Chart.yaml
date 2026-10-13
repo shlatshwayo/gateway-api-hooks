@@ -1,0 +1,5 @@
+apiVersion: v2
+name: gateway-api-hooks
+description: PreSync/PostSync hooks and RBAC for Gateway API CRD channel switches
+version: 0.1.0
+appVersion: "1.0"

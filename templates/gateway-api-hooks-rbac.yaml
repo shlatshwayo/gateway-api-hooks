@@ -1,0 +1,44 @@
+{{- if and .Values.gatewayAPI.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway-api-hook-manager
+  namespace: gateway-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync,PostSync
+    argocd.argoproj.io/sync-wave: "-7"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gateway-api-hook-manager
+  annotations:
+    argocd.argoproj.io/hook: PreSync,PostSync
+    argocd.argoproj.io/sync-wave: "-7"
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tcproutes", "udproutes", "tlsroutes", "backendlbpolicies", "backendtlspolicies"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gateway-api-hook-manager
+  annotations:
+    argocd.argoproj.io/hook: PreSync,PostSync
+    argocd.argoproj.io/sync-wave: "-7"
+subjects:
+  - kind: ServiceAccount
+    name: gateway-api-hook-manager
+    namespace: gateway-system
+roleRef:
+  kind: ClusterRole
+  name: gateway-api-hook-manager
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
